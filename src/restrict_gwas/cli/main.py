@@ -13,7 +13,7 @@ from rich.logging import RichHandler
 from restrict_gwas.cli.ldsc import app as ldsc_app
 from restrict_gwas.cli.ldsc import ldsc_rg
 from restrict_gwas.cli.utils import munge_parallel, remove_all_suffixes, rg_parallel
-from restrict_gwas.estimators import N_SEVER, MaxGCP_R, fit_coheritability
+from restrict_gwas.estimators import N_SEVER, MaxGCP_R, fit_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -520,7 +520,7 @@ def fit_command(
         cov_G_vec=gcov_vec,
         cov_P=pcov_mat,
     )
-    maxgcp_weights = fit_coheritability(data)
+    maxgcp_weights = fit_model(data)
     maxgcp_weights_df = pd.DataFrame(
         maxgcp_weights,
         index=pd.Index(features, name="feature"),
@@ -1163,7 +1163,7 @@ def nsever_command(
                 gcov_matrix=gcov_matrix_df.values,
             )
             logger.info("Fitting N-SEVER phenotype")
-            nsever_weights = fit_coheritability(maxgcp_r_data, nsever=nsever)
+            nsever_weights = fit_model(maxgcp_r_data, nsever=nsever)
 
             nsever_weights_df = pd.DataFrame(
                 nsever_weights[:, None],
