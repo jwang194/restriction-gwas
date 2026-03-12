@@ -7,7 +7,7 @@ import pandas as pd
 import pymbend.rayleigh
 import typer
 
-from maxgcp.estimators import fit_heritability
+from restrict_gwas.estimators import fit_heritability
 
 logger = logging.getLogger("rich")
 

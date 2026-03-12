@@ -4,7 +4,7 @@ from typing import Annotated
 
 import typer
 
-from maxgcp.ldsc.scripts import ldsc, munge_sumstats
+from restrict_gwas.ldsc.scripts import ldsc, munge_sumstats
 
 logger = logging.getLogger("rich")
 

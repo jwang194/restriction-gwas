@@ -1,5 +1,5 @@
 [project]
-name = "maxgcp"
+name = "restrict_gwas"
 version = "0.1.5"
 description = "Optimized phenotype definitions boost GWAS power"
 authors = [
@@ -33,7 +33,7 @@ classifiers = [
 Repository = "https://github.com/tatonetti-lab/maxgcp"
 
 [project.scripts]
-maxgcp = "maxgcp.cli.main:app"
+restrict_gwas = "restrict_gwas.cli.main:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -43,7 +43,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/maxgcp"]
+packages = ["src/restrict_gwas"]
 
 [tool.uv]
 dev-dependencies = [

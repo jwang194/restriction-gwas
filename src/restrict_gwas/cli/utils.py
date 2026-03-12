@@ -4,7 +4,7 @@ from pathlib import Path
 
 from rich.progress import track
 
-from maxgcp.cli.ldsc import ldsc_munge, ldsc_rg
+from restrict_gwas.cli.ldsc import ldsc_munge, ldsc_rg
 
 logger = logging.getLogger("rich")
 
