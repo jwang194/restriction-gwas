@@ -45,9 +45,9 @@ w_severed = fit_model(mgcp, nsever=nsvr)
 `restriction_gwas` exposes the `restrict_gwas` command in the command line.
 Once installed, run `restrict_gwas --help` to see all available commands.
 
-### MaxGCP_R (end-to-end run)
+### $\text{MaxGCP}\_\text{R}$ (end-to-end run)
 
-Runs MaxGCP_R using GWAS summary statistics and a precomputed partial (e.g. conditioned on covariates) phenotypic variance-covariance matrix:
+Runs $\text{MaxGCP}\_\text{R}$ using GWAS summary statistics and a precomputed partial (e.g. conditioned on endophenotypes' GWAS covariates) phenotypic variance-covariance matrix for the endophenotypes:
 
 ```bash
 restrict_gwas maxgcp_r \
@@ -60,7 +60,7 @@ restrict_gwas maxgcp_r \
   E11.glm.linear I10.glm.linear gwas/*.glm.linear # GWAS summary statistics for all endophenotypes and the target
 ```
 
-Alternatively, estimate the phenotypic variance-covariance matrix from summary statistics (no individual-level data needed):
+Alternatively, estimate the endophenotypes' phenotypic variance-covariance matrix from summary statistics (no individual-level data needed):
 
 ```bash
 restrict_gwas maxgcp_r \
@@ -73,9 +73,9 @@ restrict_gwas maxgcp_r \
   E11.glm.linear I10.glm.linear gwas/*.glm.linear
 ```
 
-### N-SEVER (covariate-restricted run)
+### $\text{N-SEVER}$ (covariate-restricted run)
 
-Runs N-SEVER using GWAS summary statistics:
+Runs $\text{N-SEVER}$ using GWAS summary statistics:
 
 ```bash
 restrict_gwas nsever \
@@ -88,6 +88,7 @@ restrict_gwas nsever \
   --out E11.nsever.tsv \
   E11.glm.linear I10.glm.linear gwas/*.glm.linear
 ```
+$\text{N-SEVER}$ can be run without a precomputed $\texttt{pcov}$ matrix just as $\text{MaxGCP}\_\text{R}$ can.
 
 ### Other commands
 
