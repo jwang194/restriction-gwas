@@ -1,12 +1,14 @@
 import logging
+import subprocess
+import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from restrict_gwas.ldsc.scripts import ldsc, munge_sumstats
-
 logger = logging.getLogger("rich")
+
+_LDSC_DIR = Path(__file__).parent.parent / "ldsc" / "scripts"
 
 app = typer.Typer(
     add_completion=False, context_settings={"help_option_names": ["-h", "--help"]}
@@ -31,7 +33,7 @@ def ldsc_munge(
     ] = "A1",
     a2_col: Annotated[
         str, typer.Option("--a2", help="Name of non-effect allele column")
-    ] = "OMITTED",
+    ] = "A2",
     sample_size_col: Annotated[
         str, typer.Option("--sample-size", help="Name of sample size column")
     ] = "OBS_CT",
@@ -48,29 +50,33 @@ def ldsc_munge(
             "--signed-sumstat-null", help="Null value for the signed sumstat column"
         ),
     ] = 0.0,
+    std_error_col: Annotated[
+        str, typer.Option("--se", help="Name of standard error column")
+    ] = "SE",
+    maf_col: Annotated[
+        str, typer.Option("--maf", help="Name of allele frequency column")
+    ] = "FREQ",
 ) -> None:
     """Process a GWAS summary statistics file using LDSC."""
-    args = munge_sumstats.parser.parse_args(
-        [
-            "--sumstats",
-            gwas_path.as_posix(),
-            "--out",
-            output_file.as_posix(),
-            "--snp",
-            snp_col,
-            "--a1",
-            a1_col,
-            "--a2",
-            a2_col,
-            "--N-col",
-            sample_size_col,
-            "--p",
-            p_col,
-            "--signed-sumstats",
-            f"{signed_sumstat_col},{signed_sumstat_null}",
-        ]
-    )
-    munge_sumstats.munge_sumstats(args)
+    cmd = [
+        sys.executable,
+        str(_LDSC_DIR / "munge_sumstats.py"),
+        "--sumstats", gwas_path.as_posix(),
+        "--out", output_file.as_posix(),
+        "--snp", snp_col,
+        "--a1", a1_col,
+        "--a2", a2_col,
+        "--N-col", sample_size_col,
+        "--p", p_col,
+        "--signed-sumstats", f"{signed_sumstat_col},{signed_sumstat_null}",
+        "--se", std_error_col,
+        "--frq", maf_col,
+        "--keep-maf",
+        "--keep-se",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise RuntimeError(f"munge_sumstats failed for {gwas_path.name}:\n{result.stderr}")
 
 
 @app.command(name="rg")
@@ -82,9 +88,13 @@ def ldsc_rg(
             help="Path to munged GWAS summary statistics",
         ),
     ],
-    tag_file: Annotated[
+    ldsc_reference: Annotated[
         str,
-        typer.Option("--tagfile", exists=True, help="Path to tag file or directory"),
+        typer.Option("--ldsc-reference", help="Path to LDSC reference LD scores (--ref-ld-chr)"),
+    ],
+    ldsc_weights: Annotated[
+        str,
+        typer.Option("--ldsc-weights", help="Path to LDSC regression weights (--w-ld-chr)"),
     ],
     output_stem: Annotated[
         Path,
@@ -92,16 +102,15 @@ def ldsc_rg(
     ],
 ) -> None:
     """Compute genetic covariances using LDSC."""
-    args = ldsc.parser.parse_args(
-        [
-            "--rg",
-            ",".join(p.as_posix() for p in gwas_paths),
-            "--ref-ld-chr",
-            tag_file,
-            "--w-ld-chr",
-            tag_file,
-            "--out",
-            output_stem.as_posix(),
-        ]
-    )
-    ldsc.main(args)
+    cmd = [
+        sys.executable,
+        str(_LDSC_DIR / "ldsc.py"),
+        "--rg", ",".join(p.as_posix() for p in gwas_paths),
+        "--ref-ld-chr", ldsc_reference,
+        "--w-ld-chr", ldsc_weights,
+        "--out", output_stem.as_posix(),
+        "--intercept-h2", ",".join(["1"] * len(gwas_paths)),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise RuntimeError(f"ldsc --rg failed for {output_stem.name}:\n{result.stderr}")

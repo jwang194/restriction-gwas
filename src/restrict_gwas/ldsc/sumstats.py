@@ -453,15 +453,13 @@ def estimate_rg(args, log):
     args.intercept_h2, args.intercept_gencov, args.samp_prev, args.pop_prev = map(
         f, (args.intercept_h2, args.intercept_gencov, args.samp_prev, args.pop_prev)
     )
-    map(
-        lambda x: _check_arg_len(x, n_pheno),
-        (
-            (args.intercept_h2, "--intercept-h2"),
-            (args.intercept_gencov, "--intercept-gencov"),
-            (args.samp_prev, "--samp-prev"),
-            (args.pop_prev, "--pop-prev"),
-        ),
-    )
+    for x in (
+        (args.intercept_h2, "--intercept-h2"),
+        (args.intercept_gencov, "--intercept-gencov"),
+        (args.samp_prev, "--samp-prev"),
+        (args.pop_prev, "--pop-prev"),
+    ):
+        _check_arg_len(x, n_pheno)
     if args.no_intercept:
         args.intercept_h2 = [1 for _ in range(n_pheno)]
         args.intercept_gencov = [0 for _ in range(n_pheno)]
@@ -490,9 +488,11 @@ def estimate_rg(args, log):
             if args.print_delete_vals:
                 _print_rg_delete_values(rghat, out_prefix_loop, log)
 
-        except Exception:  # keep going if phenotype 50/100 causes an error
+        except Exception as exc:  # keep going if phenotype 50/100 causes an error
+            import traceback
             msg = "ERROR computing rg for phenotype {I}/{N}, from file {F}."
             log.log(msg.format(I=i + 2, N=len(rg_paths), F=rg_paths[i + 1]))
+            log.log(traceback.format_exc())
             if len(RG) <= i:  # if exception raised before appending to RG
                 RG.append(None)
 
@@ -662,7 +662,7 @@ def _print_rg_cov(rghat, fh, log):
 
 def _split_or_none(x, n):
     if x is not None:
-        y = map(float, x.replace("N", "-").split(","))
+        y = list(map(float, x.replace("N", "-").split(",")))
     else:
         y = [None for _ in range(n)]
     return y

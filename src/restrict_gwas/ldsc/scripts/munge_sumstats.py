@@ -82,6 +82,10 @@ default_cnames = {
     "EFFECTS": "BETA",
     "EFFECT": "BETA",
     "SIGNED_SUMSTAT": "SIGNED_SUMSTAT",
+    # SE
+    "SE": "SE",
+    "STDERR": "SE",
+    "STANDARD_ERROR": "SE",
     # INFO
     "INFO": "INFO",
     # MAF
@@ -104,6 +108,7 @@ describe_cname = {
     "OR": "Odds ratio (1 --> no effect; above 1 --> A1 is risk increasing)",
     "BETA": "[linear/logistic] regression coefficient (0 --> no effect; above 0 --> A1 is trait/risk increasing)",
     "LOG_ODDS": "Log odds ratio (0 --> no effect; above 0 --> A1 is risk increasing)",
+    "SE": "Standard error of the effect size estimate.",
     "INFO": "INFO score (imputation quality; higher --> better imputation)",
     "FRQ": "Allele frequency",
     "SIGNED_SUMSTAT": "Directional summary statistic as specified by --signed-sumstats.",
@@ -119,6 +124,7 @@ numeric_cols = [
     "OR",
     "BETA",
     "LOG_ODDS",
+    "SE",
     "INFO",
     "FRQ",
     "SIGNED_SUMSTAT",
@@ -391,6 +397,7 @@ def parse_flag_cnames(log, args):
         [args.a2, "A2", "--a2"],
         [args.p, "P", "--P"],
         [args.frq, "FRQ", "--nstudy"],
+        [args.se, "SE", "--se"],
         [args.info, "INFO", "--info"],
     ]
     flag_cnames = {clean_header(x[0]): x[1] for x in cname_options if x[0] is not None}
@@ -606,6 +613,18 @@ parser.add_argument(
     action="store_true",
     help="Keep the MAF column (if one exists).",
 )
+parser.add_argument(
+    "--se",
+    default=None,
+    type=str,
+    help="Name of SE column (if not a name that ldsc understands). NB: case insensitive.",
+)
+parser.add_argument(
+    "--keep-se",
+    default=False,
+    action="store_true",
+    help="Keep the SE column (if one exists).",
+)
 
 
 # set p = False for testing in order to prevent printing
@@ -806,7 +825,11 @@ def munge_sumstats(args, p=True):
             na_values=[".", "NA"],
             iterator=True,
             chunksize=args.chunksize,
-            dtype={c: np.float64 for c in signed_sumstat_cols},
+            dtype={
+                c: np.float64
+                for c in signed_sumstat_cols
+                + [k for k, v in cname_translation.items() if v in ("SE", "FRQ")]
+            },
         )
 
         dat = parse_dat(dat_gen, cname_translation, merge_alleles, log, args)
@@ -838,6 +861,8 @@ def munge_sumstats(args, p=True):
         print_colnames = [c for c in dat.columns if c in ["SNP", "N", "Z", "A1", "A2"]]
         if args.keep_maf and "FRQ" in dat.columns:
             print_colnames.append("FRQ")
+        if args.keep_se and "SE" in dat.columns:
+            print_colnames.append("SE")
         msg = (
             "Writing summary statistics for {M} SNPs ({N} with nonmissing beta) to {F}."
         )
@@ -848,7 +873,7 @@ def munge_sumstats(args, p=True):
                 sep="\t",
                 index=False,
                 columns=print_colnames,
-                float_format="%.3f",
+                float_format="%.6g",
                 compression="gzip",
             )
 

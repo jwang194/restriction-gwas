@@ -52,7 +52,8 @@ Runs $\text{MaxGCP}\_\text{R}$ using GWAS summary statistics and a precomputed p
 ```bash
 restrict_gwas maxgcp_r \
   --pcov phenotypic_covariance_matrix.csv \  # Can be computed using restrict_gwas pcov
-  --tagfile ld_ref_panel/eur_w_ld_chr \      # LDSC tagfiles
+  --ldsc-reference ld_ref_panel/eur_w_ld_chr \
+  --ldsc-weights ld_ref_panel/eur_w_ld_chr \      # LDSC tagfiles
   --target E11 \                             # Target phenotype (stem of GWAS file)
   --n-covar 12 \                             # Covariates used in endophenotype GWAS (e.g. age+sex+10 PCs)
   --no-compress-output \
@@ -66,7 +67,8 @@ Alternatively, estimate the endophenotypes' phenotypic variance-covariance matri
 restrict_gwas maxgcp_r \
   --sumstats-only \
   --sample-overlap sample_overlap.csv \      # Pairwise sample overlap table, exclude only if there is complete sample overlap between all input endophenotypes
-  --tagfile ld_ref_panel/eur_w_ld_chr \
+  --ldsc-reference ld_ref_panel/eur_w_ld_chr \
+  --ldsc-weights ld_ref_panel/eur_w_ld_chr \
   --target E11 \
   --n-covar 12 \
   --out E11.maxgcp_r.tsv \
@@ -80,7 +82,8 @@ Runs $\text{N-SEVER}$ using GWAS summary statistics:
 ```bash
 restrict_gwas nsever \
   --pcov phenotypic_covariance_matrix.csv \
-  --tagfile ld_ref_panel/eur_w_ld_chr \
+  --ldsc-reference ld_ref_panel/eur_w_ld_chr \
+  --ldsc-weights ld_ref_panel/eur_w_ld_chr \
   --target E11 \
   --n-covar 12 \
   --covar-gwas covar1.glm.linear \           # Repeatable: one per heritable covariate for which N-SEVER should control
