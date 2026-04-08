@@ -838,6 +838,9 @@ def run_indirect_gwas(
     ] = False,
 ):
     """Compute GWAS summary statistics for a projected phenotype."""
+    if not output_file.name.endswith(".sumstats.gz"):
+        output_file = Path(str(output_file) + ".sumstats.gz")
+
     if not use_stem:
         raise NotImplementedError(
             "Indirect GWAS only currently supports GWAS files where the file "
