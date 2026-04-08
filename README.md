@@ -57,7 +57,7 @@ restrict_gwas maxgcp_r \
   --target E11 \                             # Target phenotype (stem of GWAS file)
   --n-covar 12 \                             # Covariates used in endophenotype GWAS (e.g. age+sex+10 PCs)
   --no-compress-output \
-  --out E11.maxgcp_r.tsv \
+  --out E11.maxgcp_r \
   E11.glm.linear I10.glm.linear gwas/*.glm.linear # GWAS summary statistics for all endophenotypes and the target
 ```
 
@@ -71,7 +71,7 @@ restrict_gwas maxgcp_r \
   --ldsc-weights ld_ref_panel/eur_w_ld_chr \
   --target E11 \
   --n-covar 12 \
-  --out E11.maxgcp_r.tsv \
+  --out E11.maxgcp_r \
   E11.glm.linear I10.glm.linear gwas/*.glm.linear
 ```
 
@@ -88,7 +88,7 @@ restrict_gwas nsever \
   --n-covar 12 \
   --covar-gwas covar1.glm.linear \           # Repeatable: one per heritable covariate for which N-SEVER should control
   --covar-gwas covar2.glm.linear \
-  --out E11.nsever.tsv \
+  --out E11.nsever \
   E11.glm.linear I10.glm.linear gwas/*.glm.linear
 ```
 $\text{N-SEVER}$ can be run without a precomputed $\texttt{pcov}$ matrix just as $\text{MaxGCP}\_\text{R}$ can.
@@ -106,8 +106,11 @@ For more information about LD score regression, see [the LDSC repository](https:
 
 ## Installation
 
+Requires Python ≥ 3.10.
+
 ```bash
-pip install restrict_gwas
+cd restriction-gwas
+pip install -e .
 ```
 
 Please see this repository's [pyproject.toml](pyproject.toml) for a full list of dependencies.
