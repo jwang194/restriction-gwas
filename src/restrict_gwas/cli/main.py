@@ -1250,20 +1250,34 @@ def _compute_nsever_gcov_matrix(
         ref_path = ldsc_reference.as_posix() + "/" if ldsc_reference.is_dir() else ldsc_reference.as_posix()
         w_path = ldsc_weights.as_posix() + "/" if ldsc_weights.is_dir() else ldsc_weights.as_posix()
         logger.info("Computing endophenotype-covariate genetic covariance matrix using LDSC")
-        rg_log_paths = rg_parallel(
-            gwas_paths=munged_all,
-            targets=munged_covariates,
-            ldsc_reference=ref_path,
-            ldsc_weights=w_path,
-            directory=rg_directory,
-            n_threads=n_threads,
-        )
-
-        # Parse one gcov column per covariate; pass dummy target variance of 1.0
-        # because we only need the cross-covariance rows (not the covariate self-pair).
+        # Run per-covariate: for each covariate, run parallel pairwise calls
+        # against all endophenotypes (avoids a single slow sequential LDSC call).
         gcov_cols: list[pd.DataFrame] = []
-        for log_path in rg_log_paths:
-            col_df = read_ldsc_gcov_output(log_path)
+        for covar_munged, covar_name in zip(munged_covariates, covariate_names):
+            # All munged paths except this covariate are the features
+            feature_paths = [p for p in munged_all if p != covar_munged]
+            covar_rg_dir = rg_directory / covar_name.replace(".", "_")
+            covar_rg_dir.mkdir(parents=True, exist_ok=True)
+            rg_log_paths = _rg_parallel_pairs(
+                target_munged=covar_munged,
+                feature_munged_paths=feature_paths,
+                ldsc_reference=ref_path,
+                ldsc_weights=w_path,
+                directory=covar_rg_dir,
+                n_threads=n_threads,
+            )
+            # Parse each per-feature log and combine
+            pair_dfs = []
+            for log_path in rg_log_paths:
+                try:
+                    pair_df = read_ldsc_gcov_output(log_path)
+                    pair_dfs.append(pair_df)
+                except Exception as e:
+                    logger.warning(f"Failed to parse {log_path.name}: {e}")
+            if pair_dfs:
+                gcov_cols.append(pd.concat(pair_dfs))
+
+        for i, col_df in enumerate(gcov_cols):
             if use_stem:
                 col_df.index = pd.Index(
                     [remove_all_suffixes(Path(p)).name for p in col_df.index],
@@ -1273,8 +1287,7 @@ def _compute_nsever_gcov_matrix(
                     remove_all_suffixes(Path(p)).name for p in col_df.columns
                 ]
             # Retain only rows that belong to endophenotypes (drop covariate self-rows)
-            col_df = col_df.loc[col_df.index.isin(endophenotype_names)]
-            gcov_cols.append(col_df)
+            gcov_cols[i] = col_df.loc[col_df.index.isin(endophenotype_names)]
 
     gcov_matrix_df = pd.concat(gcov_cols, axis=1)
     # Reindex to canonical ordering matching gwas_paths / covariate_gwas_paths
