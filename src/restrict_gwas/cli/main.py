@@ -349,8 +349,8 @@ def _estimate_pcov_from_sumstats(
     return pd.DataFrame(pcov, index=index, columns=index)
 
 
-def read_ldsc_gcov_output(output_path: Path) -> pd.DataFrame:
-    """Read the genetic covariance estimates from the LDSC output file."""
+def read_ldsc_gcov_output(output_path: Path) -> tuple[pd.DataFrame, pd.Series]:
+    """Read genetic covariance estimates and h2 Z-scores from an LDSC log."""
     with open(output_path) as f:
         lines = f.readlines()
 
@@ -365,6 +365,7 @@ def read_ldsc_gcov_output(output_path: Path) -> pd.DataFrame:
     def _flush(rec: dict | None) -> None:
         if rec is not None:
             rec.setdefault("h2", float("nan"))
+            rec.setdefault("h2_se", float("nan"))
             rec.setdefault("gencov", float("nan"))
             records.append(rec)
 
@@ -386,11 +387,15 @@ def read_ldsc_gcov_output(output_path: Path) -> pd.DataFrame:
         if current is None:
             continue
         if line.startswith("Total Observed scale h2: "):
-            val = line.replace("Total Observed scale h2: ", "").split()[0]
+            parts = line.replace("Total Observed scale h2: ", "").split()
             try:
-                current["h2"] = float(val)
-            except ValueError:
+                current["h2"] = float(parts[0])
+            except (ValueError, IndexError):
                 current["h2"] = float("nan")
+            try:
+                current["h2_se"] = float(parts[1].strip("()"))
+            except (ValueError, IndexError):
+                current["h2_se"] = float("nan")
         elif line.startswith("Total Observed scale gencov: "):
             val = line.replace("Total Observed scale gencov: ", "").split()[0]
             try:
@@ -416,21 +421,28 @@ def read_ldsc_gcov_output(output_path: Path) -> pd.DataFrame:
         )
         # Pad with NaN rows so downstream code still gets a full-size matrix
         while len(records) < len(features):
-            records.append({"h2": float("nan"), "gencov": float("nan")})
+            records.append({"h2": float("nan"), "h2_se": float("nan"), "gencov": float("nan")})
         records = records[: len(features)]
 
-    return (
-        pd.DataFrame(
-            {
-                "target": [target] * len(features),
-                "feature": features,
-                "heritability": [r["h2"] for r in records],
-                "genetic_covariance": [r["gencov"] for r in records],
-            }
-        )
-        .pivot(index="feature", columns="target", values="genetic_covariance")
+    df = pd.DataFrame(
+        {
+            "target": [target] * len(features),
+            "feature": features,
+            "heritability": [r["h2"] for r in records],
+            "h2_se": [r["h2_se"] for r in records],
+            "genetic_covariance": [r["gencov"] for r in records],
+        }
+    )
+    gcov_df = (
+        df.pivot(index="feature", columns="target", values="genetic_covariance")
         .rename_axis(columns=None)
     )
+    h2_z = pd.Series(
+        (df["heritability"] / df["h2_se"]).values,
+        index=df["feature"].values,
+        name="h2_z",
+    )
+    return gcov_df, h2_z
 
 def _rg_parallel_pairs(
     target_munged: Path,
@@ -537,6 +549,7 @@ def compute_genetic_covariance_vector(
         int, typer.Option("--n-threads", help="Number of threads for LDSC")
     ] = 1,
     cache_dir: Optional[Path] = None,
+    min_h2_z: Optional[float] = None,
 ) -> None:
     """Compute a genetic covariance vector (features x target) using LDSC."""
     if target not in gwas_paths:
@@ -580,21 +593,46 @@ def compute_genetic_covariance_vector(
 
         # Parse each per-feature log and combine
         gcov_records = []
+        h2_z_parts = []
         for log_path in rg_log_paths:
             try:
-                pair_df = read_ldsc_gcov_output(log_path)
+                pair_df, pair_h2_z = read_ldsc_gcov_output(log_path)
                 gcov_records.append(pair_df)
+                h2_z_parts.append(pair_h2_z)
             except Exception as e:
                 logger.warning(f"Failed to parse {log_path.name}: {e}")
         if not gcov_records:
             raise RuntimeError("All LDSC rg calls failed")
         result_df = pd.concat(gcov_records)
+        h2_z = pd.concat(h2_z_parts) if h2_z_parts else None
 
     if use_stem:
         result_df.index = pd.Index(
-            [remove_all_suffixes(Path(p)) for p in result_df.index], name="phenotype"
+            [str(remove_all_suffixes(Path(p)).name) for p in result_df.index],
+            name="phenotype",
         )
-        result_df.columns = [remove_all_suffixes(Path(p)) for p in result_df.columns]
+        result_df.columns = [
+            str(remove_all_suffixes(Path(p)).name) for p in result_df.columns
+        ]
+        if h2_z is not None:
+            h2_z.index = [
+                str(remove_all_suffixes(Path(p)).name) for p in h2_z.index
+            ]
+
+    # Drop features with NaN heritability or below the Z-score threshold
+    if h2_z is not None:
+        nan_h2 = h2_z.index[h2_z.isna()]
+        if len(nan_h2) > 0:
+            logger.warning(f"Dropping {len(nan_h2)} feature(s) with NaN h2: {nan_h2.tolist()}")
+            result_df = result_df.drop(index=nan_h2, errors="ignore")
+        if min_h2_z is not None:
+            below = h2_z.index[h2_z < min_h2_z]
+            below = below.intersection(result_df.index)
+            if len(below) > 0:
+                logger.warning(
+                    f"Dropping {len(below)} feature(s) with h2 Z < {min_h2_z}: {below.tolist()}"
+                )
+                result_df = result_df.drop(index=below)
 
     result_df.to_csv(output_file, sep="\t")
 
@@ -631,6 +669,8 @@ def fit_command(
         raise ValueError(f"Target {target} not found in genetic covariance file")
 
     features = phenotypic_covariance_df.index.drop(target, errors="ignore").tolist()
+    # Keep only features present in the gcov file (others were filtered by h2 Z-score)
+    features = [f for f in features if f in genetic_covariance_df.index]
 
     gcov_vec = genetic_covariance_df.loc[features, target].values
     nan_mask = np.isnan(gcov_vec)
@@ -958,12 +998,21 @@ def run_command(
     target: Annotated[
         Path, typer.Option(exists=True, help="Target phenotype for MaxGCP_R")
     ],
-    phenotype_covariance_file: Annotated[
+    pcov_adjusted_file: Annotated[
         Optional[Path],
         typer.Option(
-            "--pcov",
-            help="Path to phenotypic covariance file. "
-            "Mutually exclusive with --sumstats-only.",
+            "--pcov-adjusted",
+            help="Path to covariate-adjusted (residual) phenotypic covariance matrix. "
+            "Used for iGWAS SE computation. Mutually exclusive with --sumstats-only.",
+        ),
+    ] = None,
+    pcov_unadjusted_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--pcov-unadjusted",
+            help="Path to unadjusted phenotypic covariance matrix. "
+            "When provided, used for weight estimation instead of the adjusted matrix. "
+            "Optional; can be combined with either --pcov-adjusted or --sumstats-only.",
         ),
     ] = None,
     snp_col: Annotated[str, typer.Option("--snp", help="Name of SNP column")] = "ID",
@@ -1052,21 +1101,27 @@ def run_command(
             "matrix pass. Faster for large feature sets. Output is gzipped TSV.",
         ),
     ] = False,
+    min_h2_z: Annotated[
+        Optional[float],
+        typer.Option(
+            "--min-h2-z",
+            help="Minimum heritability Z-score (h2/SE) for a feature to be included. "
+            "Features with NaN heritability are always dropped.",
+        ),
+    ] = None,
 ):
     """Run MaxGCP on a set of GWAS summary statistics."""
-    # Validate mutual exclusion between --pcov and --sumstats-only
-    if sumstats_only and phenotype_covariance_file is not None:
+    # Validate: one of --pcov-adjusted or --sumstats-only required, mutually exclusive
+    if sumstats_only and pcov_adjusted_file is not None:
         raise typer.BadParameter(
-            "--sumstats-only and --pcov are mutually exclusive."
+            "--sumstats-only and --pcov-adjusted are mutually exclusive."
         )
-    if not sumstats_only and phenotype_covariance_file is None:
+    if not sumstats_only and pcov_adjusted_file is None:
         raise typer.BadParameter(
-            "Either --pcov or --sumstats-only must be specified."
+            "Either --pcov-adjusted or --sumstats-only must be specified."
         )
 
-    # When --sumstats-only is set, estimate the phenotypic covariance matrix
-    # from summary statistics and write it to a temporary file so the rest of
-    # the pipeline can proceed unchanged.
+    # Resolve the adjusted pcov (for iGWAS SE)
     pcov_tmp_path: Optional[Path] = None
     if sumstats_only:
         logger.info("Estimating phenotypic covariance matrix from summary statistics")
@@ -1094,7 +1149,10 @@ def run_command(
         pcov_tmp_path = Path(_tmp.name)
         pcov_df.to_csv(pcov_tmp_path, sep="\t")
         _tmp.close()
-        phenotype_covariance_file = pcov_tmp_path
+        pcov_adjusted_file = pcov_tmp_path
+
+    # Resolve the weights pcov: use unadjusted if provided, otherwise adjusted
+    pcov_weights_file = pcov_unadjusted_file if pcov_unadjusted_file is not None else pcov_adjusted_file
 
     try:
         logger.info("Computing genetic covariances using LDSC")
@@ -1120,11 +1178,12 @@ def run_command(
                 use_stem=use_stem,
                 n_threads=n_threads,
                 cache_dir=cache_dir,
+                min_h2_z=min_h2_z,
             )
             maxgcp_weights_path = Path(maxgcp_weights_file.name)
             fit_command(
                 genetic_covariance_file=covariance_path,
-                phenotypic_covariance_file=phenotype_covariance_file,
+                phenotypic_covariance_file=pcov_weights_file,
                 target=target_name,
                 output_file=maxgcp_weights_path,
             )
@@ -1132,7 +1191,7 @@ def run_command(
             run_indirect_gwas(
                 gwas_paths=gwas_paths,
                 projection_coefficient_file=maxgcp_weights_path,
-                phenotype_covariance_file=phenotype_covariance_file,
+                phenotype_covariance_file=pcov_adjusted_file,
                 n_covar=n_covar,
                 output_file=output_file,
                 snp_col=snp_col,
@@ -1154,15 +1213,9 @@ def run_command(
                     "Keeping intermediate files ['maxgcp_genetic_covariance.tsv', "
                     "'maxgcp_weights.tsv']"
                 )
-                covariance_path.rename(
-                    output_file.parent.joinpath("maxgcp_genetic_covariance.tsv")
-                )
-                maxgcp_weights_path.rename(
-                    output_file.parent.joinpath("maxgcp_weights.tsv")
-                )
-                # Create empty files to avoid errors when cleaning up
-                covariance_path.touch()
-                maxgcp_weights_path.touch()
+                import shutil
+                shutil.copy2(covariance_path, output_file.parent / "maxgcp_genetic_covariance.tsv")
+                shutil.copy2(maxgcp_weights_path, output_file.parent / "maxgcp_weights.tsv")
             else:
                 logger.info("Cleaning up intermediate files")
         logger.info("Done")
@@ -1270,7 +1323,7 @@ def _compute_nsever_gcov_matrix(
             pair_dfs = []
             for log_path in rg_log_paths:
                 try:
-                    pair_df = read_ldsc_gcov_output(log_path)
+                    pair_df, _h2_z = read_ldsc_gcov_output(log_path)
                     pair_dfs.append(pair_df)
                 except Exception as e:
                     logger.warning(f"Failed to parse {log_path.name}: {e}")
@@ -1331,12 +1384,21 @@ def nsever_command(
     target: Annotated[
         Path, typer.Option(exists=True, help="Target phenotype for MaxGCP")
     ],
-    phenotype_covariance_file: Annotated[
+    pcov_adjusted_file: Annotated[
         Optional[Path],
         typer.Option(
-            "--pcov",
-            help="Path to partial phenotypic variance-covariance file for the endophenotypes. "
-            "Mutually exclusive with --sumstats-only.",
+            "--pcov-adjusted",
+            help="Path to covariate-adjusted (residual) phenotypic covariance matrix. "
+            "Used for iGWAS SE computation. Mutually exclusive with --sumstats-only.",
+        ),
+    ] = None,
+    pcov_unadjusted_file: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--pcov-unadjusted",
+            help="Path to unadjusted phenotypic covariance matrix. "
+            "When provided, used for weight estimation instead of the adjusted matrix. "
+            "Optional; can be combined with either --pcov-adjusted or --sumstats-only.",
         ),
     ] = None,
     snp_col: Annotated[str, typer.Option("--snp", help="Name of SNP column")] = "ID",
@@ -1425,6 +1487,14 @@ def nsever_command(
             "matrix pass. Faster for large feature sets. Output is gzipped TSV.",
         ),
     ] = False,
+    min_h2_z: Annotated[
+        Optional[float],
+        typer.Option(
+            "--min-h2-z",
+            help="Minimum heritability Z-score (h2/SE) for a feature to be included. "
+            "Features with NaN heritability are always dropped.",
+        ),
+    ] = None,
 ):
     """Run N-SEVER on a set of GWAS summary statistics.
 
@@ -1434,13 +1504,13 @@ def nsever_command(
     restricted to that null space so that the resulting phenotype is orthogonal
     to the genetic signal of each covariate (N-SEVER projection).
     """
-    if sumstats_only and phenotype_covariance_file is not None:
+    if sumstats_only and pcov_adjusted_file is not None:
         raise typer.BadParameter(
-            "--sumstats-only and --pcov are mutually exclusive."
+            "--sumstats-only and --pcov-adjusted are mutually exclusive."
         )
-    if not sumstats_only and phenotype_covariance_file is None:
+    if not sumstats_only and pcov_adjusted_file is None:
         raise typer.BadParameter(
-            "Either --pcov or --sumstats-only must be specified."
+            "Either --pcov-adjusted or --sumstats-only must be specified."
         )
     if not covariate_gwas_paths:
         raise typer.BadParameter(
@@ -1474,14 +1544,22 @@ def nsever_command(
         pcov_tmp_path = Path(_tmp.name)
         pcov_df.to_csv(pcov_tmp_path, sep="\t")
         _tmp.close()
-        phenotype_covariance_file = pcov_tmp_path
+        pcov_adjusted_file = pcov_tmp_path
+
+    pcov_weights_file = pcov_unadjusted_file if pcov_unadjusted_file is not None else pcov_adjusted_file
 
     try:
-        logger.info("Loading partial phenotypic variance-covariance matrix")
-        sep = "," if phenotype_covariance_file.suffix == ".csv" else "\t"  # type: ignore[union-attr]
+        logger.info("Loading phenotypic variance-covariance matrices")
+        sep = "," if pcov_adjusted_file.suffix == ".csv" else "\t"  # type: ignore[union-attr]
         phenotypic_covariance_df = pd.read_csv(
-            phenotype_covariance_file, sep=sep, index_col=0
+            pcov_adjusted_file, sep=sep, index_col=0
         )
+        # Load unadjusted pcov for weights if provided
+        if pcov_unadjusted_file is not None:
+            sep_w = "," if pcov_unadjusted_file.suffix == ".csv" else "\t"
+            weights_covariance_df = pd.read_csv(pcov_unadjusted_file, sep=sep_w, index_col=0)
+        else:
+            weights_covariance_df = phenotypic_covariance_df
         target_name = remove_all_suffixes(target).name
         features = phenotypic_covariance_df.index.drop(target_name, errors="ignore").tolist()
 
@@ -1510,8 +1588,11 @@ def nsever_command(
                 use_stem=use_stem,
                 n_threads=n_threads,
                 cache_dir=cache_dir,
+                min_h2_z=min_h2_z,
             )
             gcov_vec_df = pd.read_csv(gcov_vec_path, sep="\t", index_col=0)
+            # Use only features that survived h2 filtering
+            features = [f for f in features if f in gcov_vec_df.index]
             gcov_vec = gcov_vec_df.loc[features, target_name].values
 
             # Step 2: Compute genetic covariance matrix (endophenotypes → covariates)
@@ -1534,12 +1615,13 @@ def nsever_command(
             )
 
             # Step 3: Build MaxGCP_R and N_SEVER, then fit
-            pcov_mat = phenotypic_covariance_df.loc[features, features].values
+            # Use unadjusted pcov for weight optimization if available
+            pcov_weights_mat = weights_covariance_df.loc[features, features].values
             maxgcp_r_data = MaxGCP_R(
                 endophenotype_names=features,
                 target_name=target_name,
                 cov_G_vec=gcov_vec,
-                cov_P=pcov_mat,
+                cov_P=pcov_weights_mat,
             )
             nsever = N_SEVER(
                 endophenotype_names=gcov_matrix_df.index.tolist(),
@@ -1561,7 +1643,7 @@ def nsever_command(
             run_indirect_gwas(
                 gwas_paths=gwas_paths,
                 projection_coefficient_file=gcov_matrix_path,
-                phenotype_covariance_file=phenotype_covariance_file,
+                phenotype_covariance_file=pcov_adjusted_file,
                 n_covar=n_covar,
                 output_file=output_file,
                 snp_col=snp_col,
@@ -1583,17 +1665,10 @@ def nsever_command(
                     "Keeping intermediate files ['nsever_genetic_covariance.tsv', "
                     "'nsever_gcov_matrix.tsv', 'nsever_weights.tsv']"
                 )
-                gcov_vec_path.rename(
-                    output_file.parent.joinpath("nsever_genetic_covariance.tsv")
-                )
-                gcov_matrix_df.to_csv(
-                    output_file.parent.joinpath("nsever_gcov_matrix.tsv"), sep="\t"
-                )
-                gcov_matrix_path.rename(
-                    output_file.parent.joinpath("nsever_weights.tsv")
-                )
-                gcov_vec_path.touch()
-                gcov_matrix_path.touch()
+                import shutil
+                shutil.copy2(gcov_vec_path, output_file.parent / "nsever_genetic_covariance.tsv")
+                gcov_matrix_df.to_csv(output_file.parent / "nsever_gcov_matrix.tsv", sep="\t")
+                shutil.copy2(gcov_matrix_path, output_file.parent / "nsever_weights.tsv")
             else:
                 logger.info("Cleaning up intermediate files")
         logger.info("Done")
