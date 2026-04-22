@@ -56,6 +56,7 @@ restrict_gwas maxgcp_r \
   --ldsc-weights ld_ref_panel/eur_w_ld_chr \      # LDSC tagfiles
   --target E11 \                             # Target phenotype (stem of GWAS file)
   --n-covar 12 \                             # Covariates used in endophenotype GWAS (e.g. age+sex+10 PCs)
+  --min-h2-z 4 \                             # Optional: drop endophenotypes with heritability Z-score (h2/SE) below 4
   --no-compress-output \
   --out E11.maxgcp_r \
   E11.glm.linear I10.glm.linear gwas/*.glm.linear # GWAS summary statistics for all endophenotypes and the target
@@ -114,3 +115,20 @@ pip install -e .
 ```
 
 Please see this repository's [pyproject.toml](pyproject.toml) for a full list of dependencies.
+
+## Advanced options
+
+### Separate phenotypic covariance for weight estimation
+
+By default, the matrix given to `--pcov` is used for both weight optimization and indirect GWAS SE computation. In most cases this is appropriate — using the covariate-adjusted (residual) phenotypic covariance matrix for both steps is generally a reasonable default, and we recommend it.
+
+The `--pcov-unadjusted` option is provided for users who prefer to use an unadjusted phenotypic covariance matrix for the weight optimization step. When provided, `--pcov-unadjusted` is used only for weight estimation; the matrix from `--pcov` (or `--sumstats-only`) is still used for indirect GWAS SE computation.
+
+```bash
+restrict_gwas maxgcp_r \
+  --pcov pcov_adjusted.csv \
+  --pcov-unadjusted pcov_unadjusted.csv \
+  ...
+```
+
+`--pcov-unadjusted` can be combined with either `--pcov` or `--sumstats-only`.

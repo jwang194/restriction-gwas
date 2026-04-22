@@ -1001,18 +1001,19 @@ def run_command(
     pcov_adjusted_file: Annotated[
         Optional[Path],
         typer.Option(
-            "--pcov-adjusted",
-            help="Path to covariate-adjusted (residual) phenotypic covariance matrix. "
-            "Used for iGWAS SE computation. Mutually exclusive with --sumstats-only.",
+            "--pcov",
+            help="Path to phenotypic covariance matrix. "
+            "Mutually exclusive with --sumstats-only.",
         ),
     ] = None,
     pcov_unadjusted_file: Annotated[
         Optional[Path],
         typer.Option(
             "--pcov-unadjusted",
-            help="Path to unadjusted phenotypic covariance matrix. "
-            "When provided, used for weight estimation instead of the adjusted matrix. "
-            "Optional; can be combined with either --pcov-adjusted or --sumstats-only.",
+            help="Optional: separate phenotypic covariance matrix to use for "
+            "weight estimation only. When provided, the matrix from --pcov (or "
+            "--sumstats-only) is used only for indirect GWAS SE computation. "
+            "Useful when GWAS covariates explain substantial phenotypic variance.",
         ),
     ] = None,
     snp_col: Annotated[str, typer.Option("--snp", help="Name of SNP column")] = "ID",
@@ -1111,14 +1112,14 @@ def run_command(
     ] = None,
 ):
     """Run MaxGCP on a set of GWAS summary statistics."""
-    # Validate: one of --pcov-adjusted or --sumstats-only required, mutually exclusive
+    # Validate: one of --pcov or --sumstats-only required, mutually exclusive
     if sumstats_only and pcov_adjusted_file is not None:
         raise typer.BadParameter(
-            "--sumstats-only and --pcov-adjusted are mutually exclusive."
+            "--sumstats-only and --pcov are mutually exclusive."
         )
     if not sumstats_only and pcov_adjusted_file is None:
         raise typer.BadParameter(
-            "Either --pcov-adjusted or --sumstats-only must be specified."
+            "Either --pcov or --sumstats-only must be specified."
         )
 
     # Resolve the adjusted pcov (for iGWAS SE)
@@ -1387,18 +1388,19 @@ def nsever_command(
     pcov_adjusted_file: Annotated[
         Optional[Path],
         typer.Option(
-            "--pcov-adjusted",
-            help="Path to covariate-adjusted (residual) phenotypic covariance matrix. "
-            "Used for iGWAS SE computation. Mutually exclusive with --sumstats-only.",
+            "--pcov",
+            help="Path to phenotypic covariance matrix. "
+            "Mutually exclusive with --sumstats-only.",
         ),
     ] = None,
     pcov_unadjusted_file: Annotated[
         Optional[Path],
         typer.Option(
             "--pcov-unadjusted",
-            help="Path to unadjusted phenotypic covariance matrix. "
-            "When provided, used for weight estimation instead of the adjusted matrix. "
-            "Optional; can be combined with either --pcov-adjusted or --sumstats-only.",
+            help="Optional: separate phenotypic covariance matrix to use for "
+            "weight estimation only. When provided, the matrix from --pcov (or "
+            "--sumstats-only) is used only for indirect GWAS SE computation. "
+            "Useful when GWAS covariates explain substantial phenotypic variance.",
         ),
     ] = None,
     snp_col: Annotated[str, typer.Option("--snp", help="Name of SNP column")] = "ID",
@@ -1506,11 +1508,11 @@ def nsever_command(
     """
     if sumstats_only and pcov_adjusted_file is not None:
         raise typer.BadParameter(
-            "--sumstats-only and --pcov-adjusted are mutually exclusive."
+            "--sumstats-only and --pcov are mutually exclusive."
         )
     if not sumstats_only and pcov_adjusted_file is None:
         raise typer.BadParameter(
-            "Either --pcov-adjusted or --sumstats-only must be specified."
+            "Either --pcov or --sumstats-only must be specified."
         )
     if not covariate_gwas_paths:
         raise typer.BadParameter(
