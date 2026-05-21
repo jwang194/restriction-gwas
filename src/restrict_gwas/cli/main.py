@@ -212,6 +212,8 @@ def _estimate_pcov_from_sumstats(
     n_threads: int,
     sample_overlap_file: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
+    non_feature_paths: list[Path] = (),
+    merge_alleles_path: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Estimate the phenotypic covariance matrix from GWAS summary statistics.
 
@@ -244,10 +246,17 @@ def _estimate_pcov_from_sumstats(
         sample_overlap_file: Optional path to a tab-separated pairwise sample
             overlap table (phenotype names as row/column headers, N_s values as
             entries). When omitted, sqrt(N_i * N_j) is used as N_s_ij.
+        non_feature_paths: Subset of `gwas_paths` to munge but exclude from the
+            returned pcov matrix (e.g. the target trait, or N-SEVER covariates).
+            These are munged without `--keep-maf` so they don't need allele
+            frequency, and their cached munge outputs are still available for
+            downstream LDSC rg calls. Their phenotypic variance is not used by
+            `fit_command` (which only consumes pcov[features, features]).
 
     Returns:
         Square DataFrame indexed by phenotype name containing the estimated
-        partial phenotypic variance-covariance matrix.
+        partial phenotypic variance-covariance matrix over the *features*
+        (i.e. paths in `gwas_paths` that are not in `non_feature_paths`).
     """
     # Step 1: Load sample overlap table if provided
     if sample_overlap_file is not None:
@@ -257,13 +266,20 @@ def _estimate_pcov_from_sumstats(
         overlap_df = None
 
     # Step 2: Munge all sumstats (includes SE and FRQ), then estimate variances
-    # from the munged files so everything uses the cache.
+    # from the munged files so everything uses the cache. Branch the munge so
+    # non_feature_paths (target / N-SEVER covariates) are munged without
+    # `--keep-maf`: their phenotypic variance is not consumed downstream and
+    # they may not carry an allele-frequency column. They are still munged
+    # (into the same cache dir) so downstream LDSC rg calls find them cached.
+    non_feature_set = {Path(p) for p in non_feature_paths}
+    feature_paths = [p for p in gwas_paths if p not in non_feature_set]
+    nf_paths = [p for p in gwas_paths if p in non_feature_set]
     munge_cache = cache_dir / "munged" if cache_dir is not None else None
     rg_pcov_cache = cache_dir / "rg_pcov" if cache_dir is not None else None
     with _maybe_tmpdir(munge_cache) as munge_dir, _maybe_tmpdir(rg_pcov_cache) as rg_directory:
-        logger.info("Munging sumstats for phenotypic covariance estimation")
+        logger.info("Munging feature sumstats for phenotypic covariance estimation")
         munged_paths = munge_parallel(
-            gwas_paths=gwas_paths,
+            gwas_paths=feature_paths,
             output_dir=munge_dir,
             snp_col=snp_col,
             a1_col=a1_col,
@@ -275,20 +291,43 @@ def _estimate_pcov_from_sumstats(
             n_threads=n_threads,
             std_error_col=std_error_col,
             maf_col=maf_col,
+            merge_alleles_path=merge_alleles_path,
         )
+        if nf_paths:
+            logger.info(
+                f"Munging {len(nf_paths)} non-feature sumstats without --keep-maf"
+            )
+            munge_parallel(
+                gwas_paths=nf_paths,
+                output_dir=munge_dir,
+                snp_col=snp_col,
+                a1_col=a1_col,
+                a2_col=a2_col,
+                sample_size_col=sample_size_col,
+                p_col=p_col,
+                signed_sumstat_col=signed_sumstat_col,
+                signed_sumstat_null=signed_sumstat_null,
+                n_threads=n_threads,
+                std_error_col=std_error_col,
+                maf_col=None,
+                merge_alleles_path=merge_alleles_path,
+            )
 
-        # Estimate diagonal variances and effective N from munged files
+        # Estimate diagonal variances and effective N from munged feature files
         phenotype_names = []
         variances = []
         effective_n = []
-        for gwas_path, munged_path in zip(gwas_paths, munged_paths):
+        for gwas_path, munged_path in zip(feature_paths, munged_paths):
             df = pd.read_csv(munged_path, sep="\t", usecols=["N", "SE", "FRQ"])
             N = df["N"].to_numpy(dtype=float)
             se = df["SE"].to_numpy(dtype=float)
             f = df["FRQ"].to_numpy(dtype=float)
-            var_est = float(np.median(N * 2.0 * f * (1.0 - f) * se**2))
+            # nanmedian: with --merge-alleles, munged files keep HM3 rows that
+            # were not in the input as NaN-padded entries; np.median would
+            # propagate those NaNs and zero out every Var(y) downstream.
+            var_est = float(np.nanmedian(N * 2.0 * f * (1.0 - f) * se**2))
             variances.append(var_est)
-            effective_n.append(float(np.median(N)))
+            effective_n.append(float(np.nanmedian(N)))
             name = remove_all_suffixes(gwas_path).name if use_stem else gwas_path.name
             phenotype_names.append(name)
 
@@ -550,12 +589,15 @@ def compute_genetic_covariance_vector(
     ] = 1,
     cache_dir: Optional[Path] = None,
     min_h2_z: Optional[float] = None,
+    merge_alleles_path: Optional[Path] = None,
 ) -> None:
     """Compute a genetic covariance vector (features x target) using LDSC."""
-    if target not in gwas_paths:
-        raise ValueError(f"Target {target} not found in GWAS paths")
-
-    gwas_paths = [target] + [p for p in gwas_paths if p != target]
+    # Accept target either as a positional in gwas_paths (legacy) or only via
+    # the --target flag (new). Either way, prepend it and dedupe. Use resolved
+    # paths for comparison so e.g. "foo.glm.linear" and "/abs/path/foo.glm.linear"
+    # are recognized as the same file.
+    target_resolved = target.resolve()
+    gwas_paths = [target] + [p for p in gwas_paths if p.resolve() != target_resolved]
 
     munge_cache = cache_dir / "munged" if cache_dir is not None else None
     rg_gcov_cache = cache_dir / "rg_gcov" if cache_dir is not None else None
@@ -569,6 +611,7 @@ def compute_genetic_covariance_vector(
             a2_col=a2_col,
             sample_size_col=sample_size_col,
             p_col=p_col,
+            merge_alleles_path=merge_alleles_path,
             signed_sumstat_col=signed_sumstat_col,
             signed_sumstat_null=signed_sumstat_null,
             n_threads=n_threads,
@@ -742,23 +785,40 @@ def _run_indirect_gwas_in_memory(
                  beta_col, std_error_col, sample_size_col]
 
     def _read(path: Path) -> pd.DataFrame:
+        # pandas read_csv auto-detects gzip from extension, so .tsv.gz works.
         sep = "," if path.suffix == ".csv" else "\t"
-        return pd.read_csv(path, sep=sep, usecols=read_cols)
+        df = pd.read_csv(path, sep=sep, usecols=read_cols)
+        # set rsID as index; drop within-file duplicates for safety.
+        df = df.drop_duplicates(subset=snp_col).set_index(snp_col)
+        return df
 
     logger.info(f"Reading {len(ordered_paths)} GWAS files into memory")
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as ex:
         dfs = list(ex.map(_read, ordered_paths))
 
-    snp_ids    = dfs[0][snp_col].values
-    chrom_vals = dfs[0][chrom_col].values
-    pos_vals   = dfs[0][pos_col].values
-    a1_vals    = dfs[0][a1_col].values
-    a2_vals    = dfs[0][a2_col].values
-
-    betas   = np.column_stack([df[beta_col].values        for df in dfs]).astype(float)
-    ses     = np.column_stack([df[std_error_col].values   for df in dfs]).astype(float)
-    obs_cts = np.column_stack([df[sample_size_col].values for df in dfs]).astype(float)
+    # Inner-join on rsID: every input file may have its own subset of rsIDs
+    # in its own order, so explicitly intersect and reindex. This replaces
+    # the previous assumption that `dfs[0]`'s order applies to all dfs —
+    # which silently produces misaligned arrays when files differ.
+    common_index = dfs[0].index
+    for df in dfs[1:]:
+        common_index = common_index.intersection(df.index)
+    common_index = common_index.sort_values()
+    logger.info(f"In-memory inner-join over rsIDs: {len(common_index):,} SNPs")
+    aligned = [df.reindex(common_index) for df in dfs]
     del dfs
+
+    # Pull the SNP/CHROM/POS/A1/A2 columns from the first aligned df.
+    snp_ids    = common_index.values
+    chrom_vals = aligned[0][chrom_col].values
+    pos_vals   = aligned[0][pos_col].values
+    a1_vals    = aligned[0][a1_col].values
+    a2_vals    = aligned[0][a2_col].values
+
+    betas   = np.column_stack([df[beta_col].values        for df in aligned]).astype(float)
+    ses     = np.column_stack([df[std_error_col].values   for df in aligned]).astype(float)
+    obs_cts = np.column_stack([df[sample_size_col].values for df in aligned]).astype(float)
+    del aligned
 
     # Projected betas: (M, K)
     beta_proj = betas @ W_arr
@@ -920,42 +980,81 @@ def run_indirect_gwas(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
-        safe_gwas_paths = []
+        # The igwas Rust backend reads files as plain UTF-8 — it does not
+        # auto-decompress. For .gz inputs we therefore stream-decompress
+        # into the tempdir; for plain inputs we symlink as before. The
+        # `.gz` suffix is dropped from the tempdir name so igwas's
+        # `remove_all_suffixes` ends at the same phenotype stem.
+        # Decompressions are parallelized — each is gzip-CPU-bound and the
+        # serial loop dominates wall time when feature count is large.
+        # Restrict materialization to paths whose stem appears in the
+        # projection's row index — features dropped by --min-h2-z (or NaN h2)
+        # never enter igwas, so decompressing them is pure waste.
+        import gzip as _gzip
+        import shutil as _shutil
+        import concurrent.futures as _futures
+
+        # Read projection labels once to filter the input set.
+        _proj_labels = set(
+            pd.read_csv(
+                projection_coefficient_file, sep="\t", index_col=0, nrows=0
+            ).index.tolist() if False else
+            pd.read_csv(
+                projection_coefficient_file, sep="\t", index_col=0
+            ).index.tolist()
+        )
+
         rename_map: dict[str, str] = {}
+        materialize_jobs: list[tuple[Path, Path, bool]] = []  # (src, dst, is_gz)
         for p in gwas_paths:
-            # stripped_name is the phenotype identifier (known extensions removed)
             stripped_name = remove_all_suffixes(p).name
+            if stripped_name not in _proj_labels:
+                continue
             safe_name = stripped_name.replace(".", "_")
-            # suffix is only the known GWAS extensions that were stripped
             suffix = p.name[len(stripped_name):]
-            link = tmp / (safe_name + suffix)
-            link.symlink_to(p.resolve())
-            safe_gwas_paths.append(link)
+            is_gz = suffix.endswith(".gz")
+            if is_gz:
+                materialized_suffix = suffix[: -len(".gz")] or ".tsv"
+                dst = tmp / (safe_name + materialized_suffix)
+            else:
+                dst = tmp / (safe_name + suffix)
+            materialize_jobs.append((p, dst, is_gz))
             if stripped_name != safe_name:
                 rename_map[stripped_name] = safe_name
 
-        if rename_map:
-            # Patch projection matrix index
-            proj_df = pd.read_csv(
-                projection_coefficient_file, sep="\t", index_col=0
-            )
-            proj_df.index = [rename_map.get(x, x) for x in proj_df.index]
-            patched_proj = tmp / projection_coefficient_file.name
-            proj_df.to_csv(patched_proj, sep="\t")
-            proj_path = patched_proj
+        def _materialize(src: Path, dst: Path, is_gz: bool) -> Path:
+            if is_gz:
+                with _gzip.open(src, "rb") as fin, open(dst, "wb") as fout:
+                    _shutil.copyfileobj(fin, fout, length=1 << 20)
+            else:
+                dst.symlink_to(src.resolve())
+            return dst
 
-            # Patch covariance matrix index and columns
-            pcov_df = pd.read_csv(
-                phenotype_covariance_file, sep="\t", index_col=0
+        with _futures.ThreadPoolExecutor(max_workers=max(1, n_threads)) as _ex:
+            safe_gwas_paths = list(
+                _ex.map(lambda j: _materialize(*j), materialize_jobs)
             )
+
+        # Always patch the pcov to match the projection's label set: the
+        # projection drops features that failed --min-h2-z (or NaN h2), but
+        # pcov keeps all input phenotypes. igwas_files requires matching
+        # labels. (If rename_map is non-empty, we additionally rename.)
+        proj_df = pd.read_csv(projection_coefficient_file, sep="\t", index_col=0)
+        pcov_df = pd.read_csv(phenotype_covariance_file, sep="\t", index_col=0)
+        if rename_map:
+            proj_df.index = [rename_map.get(x, x) for x in proj_df.index]
             pcov_df.index = [rename_map.get(x, x) for x in pcov_df.index]
             pcov_df.columns = [rename_map.get(x, x) for x in pcov_df.columns]
-            patched_pcov = tmp / phenotype_covariance_file.name
-            pcov_df.to_csv(patched_pcov, sep="\t")
-            pcov_path = patched_pcov
-        else:
-            proj_path = projection_coefficient_file
-            pcov_path = phenotype_covariance_file
+        kept_labels = list(proj_df.index)
+        pcov_df = pcov_df.loc[kept_labels, kept_labels]
+
+        patched_proj = tmp / projection_coefficient_file.name
+        proj_df.to_csv(patched_proj, sep="\t")
+        proj_path = patched_proj
+
+        patched_pcov = tmp / phenotype_covariance_file.name
+        pcov_df.to_csv(patched_pcov, sep="\t")
+        pcov_path = patched_pcov
 
         igwas_files(
             projection_matrix_path=proj_path.as_posix(),
@@ -1110,6 +1209,17 @@ def run_command(
             "Features with NaN heritability are always dropped.",
         ),
     ] = None,
+    merge_alleles_path: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--merge-alleles",
+            help="Path to an HM3-style SNP list (header: SNP A1 A2). When set, "
+            "munge merges to this list and canonicalizes alleles, dropping SNPs "
+            "absent from the list and ones with mismatched alleles. Strongly "
+            "recommended — without it, multiallelic / build-mismatch sites can "
+            "leak through and crash LDSC's _align_alleles step.",
+        ),
+    ] = None,
 ):
     """Run MaxGCP on a set of GWAS summary statistics."""
     # Validate: one of --pcov or --sumstats-only required, mutually exclusive
@@ -1122,6 +1232,12 @@ def run_command(
             "Either --pcov or --sumstats-only must be specified."
         )
 
+    # Exclude the target from pcov estimation: only endophenotypes contribute
+    # to the partial phenotypic covariance matrix. Use resolved paths so
+    # different string representations of the same file are detected.
+    target_resolved = target.resolve()
+    pcov_input_paths = [p for p in gwas_paths if p.resolve() != target_resolved]
+
     # Resolve the adjusted pcov (for iGWAS SE)
     pcov_tmp_path: Optional[Path] = None
     if sumstats_only:
@@ -1129,7 +1245,7 @@ def run_command(
         import tempfile as _tmpfile
 
         pcov_df = _estimate_pcov_from_sumstats(
-            gwas_paths=gwas_paths,
+            gwas_paths=pcov_input_paths,
             ldsc_reference=ldsc_reference,
             ldsc_weights=ldsc_weights,
             sample_size_col=sample_size_col,
@@ -1145,6 +1261,8 @@ def run_command(
             n_threads=n_threads,
             sample_overlap_file=sample_overlap_file,
             cache_dir=cache_dir,
+            non_feature_paths=[target],
+            merge_alleles_path=merge_alleles_path,
         )
         _tmp = _tmpfile.NamedTemporaryFile(suffix=".tsv", delete=False)
         pcov_tmp_path = Path(_tmp.name)
@@ -1180,6 +1298,7 @@ def run_command(
                 n_threads=n_threads,
                 cache_dir=cache_dir,
                 min_h2_z=min_h2_z,
+                merge_alleles_path=merge_alleles_path,
             )
             maxgcp_weights_path = Path(maxgcp_weights_file.name)
             fit_command(
@@ -1219,6 +1338,22 @@ def run_command(
                 shutil.copy2(maxgcp_weights_path, output_file.parent / "maxgcp_weights.tsv")
             else:
                 logger.info("Cleaning up intermediate files")
+            try:
+                from restrict_gwas.cli.summary import write_run_summary
+                feature_paths = [p for p in pcov_input_paths if p != target]
+                write_run_summary(
+                    method="maxgcp_r",
+                    output_file=output_file,
+                    target=target,
+                    feature_paths=feature_paths,
+                    weights_path=maxgcp_weights_path,
+                    pcov_path=Path(pcov_adjusted_file),
+                    gcov_vec_path=covariance_path,
+                    cache_dir=cache_dir,
+                    use_stem=use_stem,
+                )
+            except Exception as e:
+                logger.warning(f"Run-summary write failed: {e}")
         logger.info("Done")
     finally:
         if pcov_tmp_path is not None and pcov_tmp_path.exists():
@@ -1240,6 +1375,7 @@ def _compute_nsever_gcov_matrix(
     use_stem: bool,
     n_threads: int,
     cache_dir: Optional[Path] = None,
+    merge_alleles_path: Optional[Path] = None,
 ) -> pd.DataFrame:
     """Compute genetic covariance matrix between endophenotypes and covariates.
 
@@ -1273,8 +1409,11 @@ def _compute_nsever_gcov_matrix(
         for p in covariate_gwas_paths
     ]
 
-    # Deduplicate: any covariate path already in gwas_paths is not re-munged
-    covar_paths_new = [p for p in covariate_gwas_paths if p not in gwas_paths]
+    # Deduplicate: any covariate path already in gwas_paths is not re-munged.
+    # Use resolved paths so different string representations of the same file
+    # are detected as duplicates.
+    gwas_paths_resolved = {p.resolve() for p in gwas_paths}
+    covar_paths_new = [p for p in covariate_gwas_paths if p.resolve() not in gwas_paths_resolved]
     all_paths = gwas_paths + covar_paths_new
 
     munge_cache = cache_dir / "munged" if cache_dir is not None else None
@@ -1292,6 +1431,7 @@ def _compute_nsever_gcov_matrix(
             signed_sumstat_col=signed_sumstat_col,
             signed_sumstat_null=signed_sumstat_null,
             n_threads=n_threads,
+            merge_alleles_path=merge_alleles_path,
         )
 
         # Map each original path's stem to its munged path
@@ -1497,6 +1637,16 @@ def nsever_command(
             "Features with NaN heritability are always dropped.",
         ),
     ] = None,
+    merge_alleles_path: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--merge-alleles",
+            help="Path to an HM3-style SNP list (header: SNP A1 A2). When set, "
+            "munge merges to this list and canonicalizes alleles, dropping SNPs "
+            "absent from the list and ones with mismatched alleles. Strongly "
+            "recommended.",
+        ),
+    ] = None,
 ):
     """Run N-SEVER on a set of GWAS summary statistics.
 
@@ -1519,13 +1669,20 @@ def nsever_command(
             "At least one --covar-gwas path must be provided."
         )
 
+    # Make `--target` and `--covar-gwas` accept paths that are not also
+    # Exclude target and covariates from pcov estimation: only endophenotypes
+    # contribute to the partial phenotypic covariance matrix. Use resolved
+    # paths so different string representations of the same file are detected.
+    excluded_resolved = {target.resolve()} | {c.resolve() for c in covariate_gwas_paths}
+    pcov_input_paths = [p for p in gwas_paths if p.resolve() not in excluded_resolved]
+
     pcov_tmp_path: Optional[Path] = None
     if sumstats_only:
         logger.info("Estimating partial phenotypic variance-covariance matrix from summary statistics")
         import tempfile as _tmpfile
 
         pcov_df = _estimate_pcov_from_sumstats(
-            gwas_paths=gwas_paths,
+            gwas_paths=pcov_input_paths,
             ldsc_reference=ldsc_reference,
             ldsc_weights=ldsc_weights,
             sample_size_col=sample_size_col,
@@ -1541,6 +1698,8 @@ def nsever_command(
             n_threads=n_threads,
             sample_overlap_file=sample_overlap_file,
             cache_dir=cache_dir,
+            non_feature_paths=[target, *covariate_gwas_paths],
+            merge_alleles_path=merge_alleles_path,
         )
         _tmp = _tmpfile.NamedTemporaryFile(suffix=".tsv", delete=False)
         pcov_tmp_path = Path(_tmp.name)
@@ -1591,6 +1750,7 @@ def nsever_command(
                 n_threads=n_threads,
                 cache_dir=cache_dir,
                 min_h2_z=min_h2_z,
+                merge_alleles_path=merge_alleles_path,
             )
             gcov_vec_df = pd.read_csv(gcov_vec_path, sep="\t", index_col=0)
             # Use only features that survived h2 filtering
@@ -1614,22 +1774,45 @@ def nsever_command(
                 use_stem=use_stem,
                 n_threads=n_threads,
                 cache_dir=cache_dir,
+                merge_alleles_path=merge_alleles_path,
             )
 
             # Step 3: Build MaxGCP_R and N_SEVER, then fit
-            # Use unadjusted pcov for weight optimization if available
-            pcov_weights_mat = weights_covariance_df.loc[features, features].values
+            # Subset the endophenotype-covariate gcov matrix to the kept
+            # features (those that survived --min-h2-z + non-NaN h2). The
+            # _compute_nsever_gcov_matrix function returns rows for *all*
+            # input endophenotypes, including IL13-style failures whose
+            # gcov entries are NaN — feeding those into N_SEVER would
+            # crash scipy linalg with "array must not contain infs or NaNs".
+            # Also drop any kept feature whose row in gcov_matrix is still
+            # NaN (e.g. an LDSC convergence failure for a feature×covariate
+            # pair).
+            gcov_matrix_kept = gcov_matrix_df.loc[
+                gcov_matrix_df.index.intersection(features)
+            ]
+            nan_rows = gcov_matrix_kept.index[gcov_matrix_kept.isna().any(axis=1)]
+            if len(nan_rows) > 0:
+                logger.warning(
+                    f"N-SEVER: dropping {len(nan_rows)} feature(s) with NaN "
+                    f"endophenotype-covariate gcov: {nan_rows.tolist()}"
+                )
+                gcov_matrix_kept = gcov_matrix_kept.drop(index=nan_rows)
+            features_for_nsever = gcov_matrix_kept.index.tolist()
+
+            pcov_weights_mat = weights_covariance_df.loc[features_for_nsever, features_for_nsever].values
+            gcov_vec_for_nsever = gcov_vec_df.loc[features_for_nsever, target_name].values
             maxgcp_r_data = MaxGCP_R(
-                endophenotype_names=features,
+                endophenotype_names=features_for_nsever,
                 target_name=target_name,
-                cov_G_vec=gcov_vec,
+                cov_G_vec=gcov_vec_for_nsever,
                 cov_P=pcov_weights_mat,
             )
             nsever = N_SEVER(
-                endophenotype_names=gcov_matrix_df.index.tolist(),
-                covariate_names=gcov_matrix_df.columns.tolist(),
-                gcov_matrix=gcov_matrix_df.values,
+                endophenotype_names=features_for_nsever,
+                covariate_names=gcov_matrix_kept.columns.tolist(),
+                gcov_matrix=gcov_matrix_kept.values,
             )
+            features = features_for_nsever  # downstream igwas uses this
             logger.info("Fitting N-SEVER phenotype")
             nsever_weights = fit_model(maxgcp_r_data, nsever=nsever)
 
@@ -1673,6 +1856,23 @@ def nsever_command(
                 shutil.copy2(gcov_matrix_path, output_file.parent / "nsever_weights.tsv")
             else:
                 logger.info("Cleaning up intermediate files")
+            try:
+                from restrict_gwas.cli.summary import write_run_summary
+                excluded = {target, *covariate_gwas_paths}
+                feature_paths = [p for p in pcov_input_paths if p not in excluded]
+                write_run_summary(
+                    method="nsever",
+                    output_file=output_file,
+                    target=target,
+                    feature_paths=feature_paths,
+                    weights_path=gcov_matrix_path,
+                    pcov_path=Path(pcov_adjusted_file),
+                    gcov_vec_path=gcov_vec_path,
+                    cache_dir=cache_dir,
+                    use_stem=use_stem,
+                )
+            except Exception as e:
+                logger.warning(f"Run-summary write failed: {e}")
         logger.info("Done")
     finally:
         if pcov_tmp_path is not None and pcov_tmp_path.exists():
