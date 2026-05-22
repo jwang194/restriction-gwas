@@ -2,7 +2,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 
 import typer
 
@@ -54,8 +54,21 @@ def ldsc_munge(
         str, typer.Option("--se", help="Name of standard error column")
     ] = "SE",
     maf_col: Annotated[
-        str, typer.Option("--maf", help="Name of allele frequency column")
+        Optional[str],
+        typer.Option(
+            "--maf",
+            help="Name of allele frequency column (pass empty to skip MAF)",
+        ),
     ] = "FREQ",
+    merge_alleles_path: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--merge-alleles",
+            help="Path to an HM3-style SNP list (SNP A1 A2). When set, munge "
+            "merges to this list and canonicalizes alleles, dropping SNPs "
+            "absent from the list and ones with mismatched alleles.",
+        ),
+    ] = None,
 ) -> None:
     """Process a GWAS summary statistics file using LDSC."""
     cmd = [
@@ -70,10 +83,15 @@ def ldsc_munge(
         "--p", p_col,
         "--signed-sumstats", f"{signed_sumstat_col},{signed_sumstat_null}",
         "--se", std_error_col,
-        "--frq", maf_col,
-        "--keep-maf",
         "--keep-se",
     ]
+    if maf_col:
+        # Only request a MAF column when one is provided. Sumstats without
+        # allele frequencies (e.g. several public meta GWAS) would otherwise
+        # be filtered to zero rows by --keep-maf.
+        cmd.extend(["--frq", maf_col, "--keep-maf"])
+    if merge_alleles_path is not None:
+        cmd.extend(["--merge-alleles", merge_alleles_path.as_posix()])
     result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         raise RuntimeError(f"munge_sumstats failed for {gwas_path.name}:\n{result.stderr}")

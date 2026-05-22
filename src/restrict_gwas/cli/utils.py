@@ -1,6 +1,7 @@
 import concurrent.futures
 import logging
 from pathlib import Path
+from typing import Optional
 
 from rich.progress import track
 
@@ -21,7 +22,7 @@ def remove_all_suffixes(path: Path) -> Path:
     return path
 
 
-def run_munge(args: tuple[Path, Path, str, str, str, str, str, str, float, str, str]) -> Path:
+def run_munge(args: tuple[Path, Path, str, str, str, str, str, str, float, str, Optional[str], Optional[Path]]) -> Path:
     (
         gwas_path,
         output_dir,
@@ -34,6 +35,7 @@ def run_munge(args: tuple[Path, Path, str, str, str, str, str, str, float, str, 
         signed_sumstat_null,
         std_error_col,
         maf_col,
+        merge_alleles_path,
     ) = args
     output_root = output_dir.joinpath(gwas_path.name)
     output_path = output_dir.joinpath(gwas_path.name + ".sumstats.gz")
@@ -52,6 +54,7 @@ def run_munge(args: tuple[Path, Path, str, str, str, str, str, str, float, str, 
         signed_sumstat_null=signed_sumstat_null,
         std_error_col=std_error_col,
         maf_col=maf_col,
+        merge_alleles_path=merge_alleles_path,
     )
     return output_path
 
@@ -68,7 +71,8 @@ def munge_parallel(
     signed_sumstat_null: float,
     n_threads: int,
     std_error_col: str = "SE",
-    maf_col: str = "FREQ",
+    maf_col: Optional[str] = "FREQ",
+    merge_alleles_path: Optional[Path] = None,
 ) -> list[Path]:
     args = [
         (
@@ -83,6 +87,7 @@ def munge_parallel(
             signed_sumstat_null,
             std_error_col,
             maf_col,
+            merge_alleles_path,
         )
         for gwas_path in gwas_paths
     ]
